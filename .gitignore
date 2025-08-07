@@ -8,4 +8,5 @@ zephyr/
 .vscode/
 .west/
 
-
+# Ignore token.txt file
+token.txt
