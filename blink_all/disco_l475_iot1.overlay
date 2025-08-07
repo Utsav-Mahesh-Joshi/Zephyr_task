@@ -1,0 +1,11 @@
+/{
+	leds{
+		wf_led:wfbt_led_3{
+			gpios = <&gpioc 9 GPIO_ACTIVE_HIGH>;
+			label = "Wifi Led";
+		};
+	};
+	aliases{
+		led2 = &wf_led;
+	};	
+};
