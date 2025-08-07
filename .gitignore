@@ -1,0 +1,9 @@
+
+# Ingore directories
+build/
+bootloader/
+tools/
+zephyr/
+.venv/
+.vscode/
+.west/

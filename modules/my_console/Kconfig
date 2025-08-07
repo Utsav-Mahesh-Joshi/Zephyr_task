@@ -1,0 +1,7 @@
+#create a new symbol my_console
+
+config MY_CONSOLE
+	bool "basic print commands to console"
+	depends on PRINTK #printk should be enabled for this to work
+	help
+		Adds my_console() function to enable printing and logging on the device

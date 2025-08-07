@@ -1,0 +1,24 @@
+/{
+	pwmleds:pwmleds{
+		status = "okay";
+		green_pwm_1:green_led_1{
+			pwms = <&pwm2 1 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+		};
+		green_pwm_2:green_led_2{
+	        	pwms = <&pwm15 1 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+
+		};
+	};
+};
+&spi1{
+	pinctrl-0 = <&spi1_sck_pb3 &spi1_miso_pb4 &spi1_mosi_pb5>;
+	status="disabled";
+};
+&timers2 {
+         pwm2: pwm {
+              
+                pinctrl-0 = <&tim2_ch1_pa5>; /* LD1 */
+                pinctrl-names = "default";
+        };
+};
+
