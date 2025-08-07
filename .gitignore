@@ -1,5 +1,5 @@
 
-# Ingore directories
+# Ignore directories
 build/
 bootloader/
 tools/
@@ -7,3 +7,5 @@ zephyr/
 .venv/
 .vscode/
 .west/
+
+
