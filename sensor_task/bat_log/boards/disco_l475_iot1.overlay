@@ -1,0 +1,77 @@
+/ {
+        aliases {
+                ht-sensor = &hts;
+                pressure-sensor = &lps22hb;
+                imu-sensor = &lsm6dsl;
+        };
+};
+&flash0 {
+        /delete-node/ partitions;
+
+        partitions {
+                compatible = "fixed-partitions";
+                #address-cells = <1>;
+                #size-cells = <1>;
+
+                /* 0x00000000 .. 0x0000FFFF (64 KiB) */
+                boot_partition: partition@0 {
+                        label = "mcuboot";
+                        reg = <0x00000000 0x00010000>;
+                        read-only;
+                };
+
+                /* 0x00010000 .. 0x000EFFFF (832 KiB) */
+                slot0_partition: partition@10000 {
+                        label = "image-0";
+                        reg = <0x00010000 0x000D0000>;
+                };
+
+                /* 0x000E0000 .. 0x000FFFFF (128 KiB) */
+                app_lfs: partition@e0000 {
+                        label = "app-lfs";
+                        reg = <0x000E0000 0x00020000>;
+                };
+	};
+};
+
+&i2c2 {
+        status = "okay";
+
+        /* HTS221 @ 0x5F */
+        hts: hts221@5f {
+                compatible = "st,hts221";
+                reg = <0x5f>;
+                /* adjust to your actual DRDY pin if you want an IRQ */
+                /* drdy-gpios = <&gpiod 15 GPIO_ACTIVE_HIGH>; */
+                status = "okay";
+        };
+
+        /* LPS22HB @ 0x5D (some boards use 0x5C) */
+        lps22hb: lps22hb-press@5d {
+                compatible = "st,lps22hb-press";
+                reg = <0x5d>;
+                status = "okay";
+        };
+       /* LSM6DSL @ 0x6A (alt addr 0x6B) */
+        lsm6dsl: lsm6dsl@6a {
+                compatible = "st,lsm6dsl";
+                reg = <0x6a>;
+                /* irq-gpios = <&gpiod 11 GPIO_ACTIVE_HIGH>; */
+                status = "okay";
+        };
+};
+
+
+
+/ {
+	chosen {
+		zephyr,console = &usart1;
+		zephyr,shell-uart = &usart1;
+	};
+};
+&usart1 {
+	status = "okay";
+	/* current-speed 115200 is already set by the board; keep it */
+	wakeup-source;		/* <- key: RX can wake from STOP */
+	 wakeup-line = <7>;
+};
