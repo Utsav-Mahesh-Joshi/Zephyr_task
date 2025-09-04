@@ -1,0 +1,169 @@
+#include "shell_threads.h"
+#include <zephyr/kernel.h>
+#include <zephyr/fs/fs.h>
+#include <zephyr/fs/littlefs.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/shell/shell.h>
+#include <string.h>
+LOG_MODULE_REGISTER(shell_threads);
+static struct k_thread hum_thread_data, press_thread_data, imu_thread_data;
+static K_THREAD_STACK_DEFINE(hum_stack, 2048);
+static K_THREAD_STACK_DEFINE(press_stack, 2048);
+static K_THREAD_STACK_DEFINE(imu_stack, 2048);
+
+K_SEM_DEFINE(semHT, 1, 1);  
+K_SEM_DEFINE(semPress, 0, 1);
+K_SEM_DEFINE(semGyro, 0, 1);
+
+
+static k_tid_t hum_tid = NULL, press_tid = NULL, imu_tid = NULL;
+
+void hum_thread(void *a, void *b, void *c)
+{
+    struct fs_file_t file;
+    char buffer[128];
+    char filestr[256];
+
+    while (1) {
+        if (hum_temp_sensor_get_string(buffer, sizeof(buffer)) > 0) {
+            fs_file_t_init(&file);
+	    k_sem_take(&semHT,K_FOREVER);
+	    uint64_t ms = k_uptime_get();
+	    uint32_t sec = (uint32_t)(ms / 1000U);
+            uint32_t mms = (uint32_t)(ms % 1000U);
+            if (fs_open(&file,  "/lfs/sensor.txt",FS_O_CREATE | FS_O_WRITE | FS_O_APPEND) == 0) {
+		snprintf(filestr,sizeof(filestr),"[%lu.%03lu] HT sensor : %s \r\n",sec,mms,buffer);
+                fs_write(&file, filestr, strlen(filestr));
+                fs_close(&file);
+		k_sem_give(&semPress);
+            }
+        }
+        k_sleep(K_SECONDS(2));
+    }
+}
+
+void press_thread(void *a, void *b, void *c)
+{
+    struct fs_file_t file;
+    char buffer[128];
+    char filestr[256];
+
+    while (1) {
+        if (pressure_sensor_get_string(buffer, sizeof(buffer)) > 0) {
+            fs_file_t_init(&file);
+            k_sem_take(&semPress,K_FOREVER);
+            uint64_t ms = k_uptime_get();
+            uint32_t sec = (uint32_t)(ms / 1000U);
+            uint32_t mms = (uint32_t)(ms % 1000U);
+            if (fs_open(&file,  "/lfs/sensor.txt",FS_O_CREATE | FS_O_WRITE | FS_O_APPEND) == 0) {
+		    snprintf(filestr,sizeof(filestr),"[%lu.%03lu] Pressure sensor : %s \r\n",sec,mms,buffer);
+                    fs_write(&file, filestr, strlen(filestr));
+                    fs_close(&file);
+                    k_sem_give(&semGyro);
+
+            }
+        }
+        k_sleep(K_SECONDS(3));
+    }
+}
+
+void imu_thread(void *a, void *b, void *c)
+{
+    struct fs_file_t file;
+    char buffer[128];
+    char filestr[256];
+
+    while (1) {
+        if (imu_sensor_get_string(buffer, sizeof(buffer)) > 0) {
+            fs_file_t_init(&file);
+            k_sem_take(&semGyro,K_FOREVER);
+	    uint64_t ms = k_uptime_get();
+            uint32_t sec = (uint32_t)(ms / 1000U);
+            uint32_t mms = (uint32_t)(ms % 1000U);
+
+            if (fs_open(&file,  "/lfs/sensor.txt",FS_O_CREATE | FS_O_WRITE | FS_O_APPEND) == 0) {
+		    snprintf(filestr,sizeof(filestr),"[%lu.%03lu] Gyro sensor : %s \r\n",sec,mms,buffer);
+                    fs_write(&file, filestr, strlen(filestr));
+                    fs_close(&file);
+                    k_sem_give(&semHT);
+
+            }
+        }
+        k_sleep(K_SECONDS(4));
+    }
+}
+
+static int cmd_start_sensor(const struct shell *sh, size_t argc, char **argv)
+{
+    if (!hum_tid) {
+        hum_tid = k_thread_create(&hum_thread_data, hum_stack,K_THREAD_STACK_SIZEOF(hum_stack),hum_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
+        shell_print(sh, "HT logging started.");
+    } else {
+        shell_print(sh, "HT logging already running.");
+    }
+    if (!press_tid) {
+        press_tid = k_thread_create(&press_thread_data, press_stack,K_THREAD_STACK_SIZEOF(press_stack),press_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
+        shell_print(sh, "PRESS logging started.");
+    } else {
+        shell_print(sh, "PRESS logging already running.");
+    }
+    if (!imu_tid) {
+        imu_tid = k_thread_create(&imu_thread_data, imu_stack,K_THREAD_STACK_SIZEOF(imu_stack),imu_thread, NULL, NULL, NULL,5, 0, K_NO_WAIT);
+        shell_print(sh, "IMU logging started.");
+    } else {
+        shell_print(sh, "IMU logging already running.");
+    }
+    return 0;
+}
+
+static int cmd_stop_sensors(const struct shell *sh, size_t argc, char **argv)
+{
+    if (hum_tid) {
+        k_thread_abort(hum_tid);
+        hum_tid = NULL;
+        shell_print(sh, "HT logging stopped.");
+    } else {
+        shell_print(sh, "HT logging not running.");
+    }
+    if (press_tid) {
+        k_thread_abort(press_tid);
+        press_tid = NULL;
+        shell_print(sh, "Pressure logging stopped.");
+    } else {
+        shell_print(sh, "Pressure logging not running.");
+    }
+    if (imu_tid) {
+        k_thread_abort(imu_tid);
+        imu_tid = NULL;
+        shell_print(sh, "Gyro logging stopped.");
+    } else {
+        shell_print(sh, "Gyro logging not running.");
+    }
+    return 0;
+}
+
+static int cmd_clear_logs(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    int ret;
+
+    ret = fs_unlink("/lfs/sensor.txt");
+    if (ret < 0 && ret != -ENOENT) {
+        shell_fprintf(shell, SHELL_ERROR, "Failed to remove sensors.txt (%d)\n", ret);
+    }
+
+    shell_fprintf(shell, SHELL_NORMAL, "All log files cleared!\n");
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_sensors,
+    SHELL_CMD(start_sensors,NULL,"Start logging of sensor data",cmd_start_sensor),	
+    SHELL_CMD(stop_sensors,NULL,"Stop logging of sensor data",cmd_stop_sensors),
+    SHELL_CMD(clear_logs,NULL,"Clear logs of sensor data",cmd_clear_logs),	
+    SHELL_SUBCMD_SET_END
+);
+SHELL_CMD_REGISTER(sensors, &sub_sensors, "Sensor logging commands", NULL);
+
