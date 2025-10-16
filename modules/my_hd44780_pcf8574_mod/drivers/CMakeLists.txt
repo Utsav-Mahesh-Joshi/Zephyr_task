@@ -1,0 +1,1 @@
+add_subdirectory_ifdef(CONFIG_HD44780_PCF8574 hd44780_pcf8574)

@@ -1,0 +1,8 @@
+# zephyr/module.yml
+# use spaces in YAML (no tabs!)
+name: my_hd44780_pcf8574_mod
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .

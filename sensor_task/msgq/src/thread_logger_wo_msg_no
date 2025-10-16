@@ -1,0 +1,29 @@
+ for (;;)
+        {
+                k_msleep(FLUSH_PERIOD_MS);
+                /* wait for at least one item, but NOT under the FS mutex */
+                k_msgq_get(&msgq, line, K_FOREVER);
+
+                k_mutex_lock(&g_sd_mtx, K_FOREVER);
+
+                fs_file_t_init(&file);
+                if (fs_open(&file, SENSOR_PATH, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND) == 0)
+                {
+                        size_t n = strnlen(line, sizeof line);
+                        (void)fs_write(&file, line, n); 
+
+                        /* drain the rest without blocking */
+                        while (k_msgq_get(&msgq, line, K_NO_WAIT) == 0)
+                        {
+                                n = strnlen(line, sizeof line);
+                                (void)fs_write(&file, line, n); 
+                        }
+                        (void)fs_close(&file);
+                }
+
+                k_mutex_unlock(&g_sd_mtx);
+
+        }
+
+}
+

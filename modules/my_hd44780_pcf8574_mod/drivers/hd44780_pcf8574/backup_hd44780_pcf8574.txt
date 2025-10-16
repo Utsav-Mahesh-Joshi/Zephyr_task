@@ -1,0 +1,262 @@
+/*
+ * HD44780 LCD via PCF8574 I2C backpack (4-bit mode)
+ *
+ *	- Default bit map:
+ *		P0 RS, P1 RW, P2 E, P3 BL, P4..P7 D4..D7
+ *	- Backlight polarity selectable by DT (bl-active-low)
+ *	- Minimal public API exposed via include/hd44780_pcf8574.h
+ *
+ * Tabs for indent; braces on new lines.
+ */
+
+#include "hd44780_pcf8574.h"
+#include <zephyr/logging/log.h>
+
+#define DT_DRV_COMPAT hit_hd44780_pcf8574   /* <-- MUST match your compatible */
+
+LOG_MODULE_REGISTER(hd44780_pcf8574, LOG_LEVEL_INF);
+
+#define CMD_CLEAR	0x01
+#define CMD_HOME	0x02
+#define CMD_ENTRY	0x04	/* I/D,S */
+#define CMD_DISPLAY	0x08	/* D,C,B */
+#define CMD_SHIFT	0x10
+#define CMD_FUNC	0x20	/* DL,N,F */
+#define CMD_CGRAM	0x40
+#define CMD_DDRAM	0x80
+
+#define ENTRY_ID	BIT(1)	/* increment */
+#define DISPLAY_D	BIT(2)	/* display on */
+#define DISPLAY_C	BIT(1)	/* cursor on */
+#define DISPLAY_B	BIT(0)	/* blink on */
+
+#define FUNC_DL		BIT(4)	/* 8-bit */
+#define FUNC_N		BIT(3)	/* 2-line */
+#define FUNC_F		BIT(2)	/* 5x10 font */
+
+struct hd44780_pcf8574_row_base
+{
+	uint8_t row;
+	uint8_t base;
+};
+
+/* Common DDRAM base addresses by row (16x2 / 20x4 variants) */
+static inline uint8_t ddram_addr(uint8_t col, uint8_t row, uint8_t rows)
+{
+	static const struct hd44780_pcf8574_row_base map2[] = {
+		{0, 0x00}, {1, 0x40},
+	};
+	static const struct hd44780_pcf8574_row_base map4[] = {
+		{0, 0x00}, {1, 0x40}, {2, 0x14}, {3, 0x54},
+	};
+	const struct hd44780_pcf8574_row_base *m = (rows > 2) ? map4 : map2;
+	return m[row].base + col;
+}
+
+static int pcf_write(const struct device *dev, uint8_t v)
+{
+	const struct hd44780_pcf8574_cfg *cfg = dev->config;
+	return i2c_write_dt(&cfg->i2c, &v, 1);
+}
+
+static int strobe(const struct device *dev, uint8_t v)
+{
+	int r = 0;
+	r |= pcf_write(dev, v | P_E);
+	k_busy_wait(1);		/* >= 450 ns */
+	r |= pcf_write(dev, v & ~P_E);
+	k_busy_wait(50);	/* >= 37 us between cmds (safe) */
+	return r;
+}
+
+static int write4(const struct device *dev, uint8_t nibble, bool rs)
+{
+	struct hd44780_pcf8574_data *data = dev->data;
+	uint8_t v = data->ctrl;
+	//uint8_t v=0;
+	//uint8_t packet;
+	if (rs) v |= P_RS;
+	else v &= ~P_RS;
+
+	/* nibble low bit -> D4 */
+	if (nibble & 0x01) v |= P_D4; else v &= ~P_D4;
+	if (nibble & 0x02) v |= P_D5; else v &= ~P_D5;
+	if (nibble & 0x04) v |= P_D6; else v &= ~P_D6;
+	if (nibble & 0x08) v |= P_D7; else v &= ~P_D7;
+	
+	//packet()
+
+	return strobe(dev, v);
+	//return pcf_write(dev, v);
+}
+
+static int send(const struct device *dev, uint8_t byte, bool rs)
+{
+	int r = 0;
+	r |= write4(dev, (byte >> 4) & 0x0F, rs);
+	r |= write4(dev, (byte >> 0) & 0x0F, rs);
+	return r;
+}
+
+static int cmd(const struct device *dev, uint8_t c)
+{
+	return send(dev, c, false);
+}
+
+static int data_write(const struct device *dev, uint8_t data)
+{
+	return send(dev, data, true);
+}
+
+static void backlight_apply(const struct device *dev, bool on)
+{
+	const struct hd44780_pcf8574_cfg *cfg = dev->config;
+	struct hd44780_pcf8574_data *data = dev->data;
+	bool phys_on = on ^ cfg->bl_active_low;
+
+	if (phys_on) {
+		data->ctrl |= P_BL;
+	} else {
+		data->ctrl &= ~P_BL;
+	}
+	/* push ctrl change quickly (no E pulse) */
+	LOG_INF("pushing apply backlight with ctrl %x",data->ctrl);
+	(void)pcf_write(dev, data->ctrl);
+}
+
+static int fn_clear(const struct device *dev)
+{
+	int r = cmd(dev, CMD_CLEAR);
+	k_msleep(2);	/* clear/home take ~1.52 ms */
+	return r;
+}
+
+static int fn_home(const struct device *dev)
+{
+	int r = cmd(dev, CMD_HOME);
+	k_msleep(2);
+	return r;
+}
+
+static int fn_set_cursor(const struct device *dev, uint8_t col, uint8_t row)
+{
+	const struct hd44780_pcf8574_cfg *cfg = dev->config;
+	if (row >= cfg->rows) return -EINVAL;
+	if (col >= cfg->cols) return -EINVAL;
+
+	uint8_t addr = ddram_addr(col, row, cfg->rows);
+	return cmd(dev, CMD_DDRAM | (addr & 0x7F));
+}
+
+static int fn_control(const struct device *dev, bool display, bool cursor, bool blink)
+{
+	uint8_t v = CMD_DISPLAY;
+	if (display) v |= DISPLAY_D;
+	if (cursor)  v |= DISPLAY_C;
+	if (blink)   v |= DISPLAY_B;
+	return cmd(dev, v);
+}
+
+static int fn_write(const struct device *dev, const char *s, size_t n)
+{
+	for (size_t i = 0; i < n; ++i) {
+		//LOG_INF("putting char %c @ i %d", s[i],i);
+		int r = data_write(dev, (uint8_t)s[i]);
+		if (r)
+		{ 
+			LOG_ERR("write error %d",r);
+			return r;
+		}
+	}
+	return 0;
+}
+
+/* -------- device API table -------- */
+static const struct hd44780_pcf8574_api api = {
+	.write = fn_write,
+	.clear = fn_clear,
+	.home = fn_home,
+	.set_cursor = fn_set_cursor,
+	.control = fn_control,
+};
+
+/* -------- init sequence (4-bit mode) -------- */
+static int hd44780_init(const struct device *dev)
+{
+	const struct hd44780_pcf8574_cfg *cfg = dev->config;
+	struct hd44780_pcf8574_data *data = dev->data;
+
+	if (!device_is_ready(cfg->i2c.bus)) {
+		return -ENODEV;
+	}
+
+	LOG_INF("init: device name=%s", dev->name);
+	LOG_INF("init: i2c bus=%s", cfg->i2c.bus->name);
+    	LOG_INF("init: i2c addr=0x%02x", cfg->i2c.addr);
+    	LOG_INF("init: LCD cols=%d, rows=%d", cfg->cols, cfg->rows);
+   	LOG_INF("init: backlight active low=%d", cfg->bl_active_low);
+
+
+
+	k_mutex_init(&data->lock);
+	data->ctrl = 0x00;
+	data->ctrl &= ~(P_RW | P_RS | P_E);
+	backlight_apply(dev, IS_ENABLED(CONFIG_HD44780_PCF8574_BACKLIGHT_ON_BOOT));
+	LOG_INF("backlight:%d",IS_ENABLED(CONFIG_HD44780_PCF8574_BACKLIGHT_ON_BOOT));
+	/* As per datasheet: wait >40 ms after VCC rises to 2.7V */
+	k_msleep(50);
+
+	/* Force into 4-bit mode: send high-nibble 0x3 three times, then 0x2 */
+	write4(dev, 0x03, false);
+	//cmd(dev,0x30);
+	k_msleep(5);
+	//cmd(dev,0x30);
+	write4(dev, 0x03, false);
+	k_msleep(5);
+	write4(dev, 0x03, false);
+	k_msleep(1);
+	//cmd(dev,0x20);
+	write4(dev, 0x02, false);
+	k_msleep(10);
+
+	/* Function set: 4-bit, N=rows>1, F=5x8 */
+	uint8_t func = CMD_FUNC | (cfg->rows > 1 ? FUNC_N : 0);
+	cmd(dev, func);
+	k_msleep(1);
+	/* Display OFF, Clear, Entry mode, Display ON */
+	cmd(dev, CMD_DISPLAY);	/* display off */
+	k_msleep(1);
+	fn_clear(dev);
+	cmd(dev, CMD_ENTRY | ENTRY_ID);			/* increment, no shift */
+	fn_control(dev, true, false, false);
+	LOG_INF("setup done");
+	return 0;
+}
+
+/* -------- DT glue -------- */
+
+#define HD44780_CFG(inst) \
+	static const struct hd44780_pcf8574_cfg cfg_##inst = { \
+		.i2c = I2C_DT_SPEC_INST_GET(inst), \
+		.cols = DT_INST_PROP_OR(inst, columns, CONFIG_HD44780_PCF8574_DEFAULT_COLS), \
+		.rows = DT_INST_PROP_OR(inst, rows,    CONFIG_HD44780_PCF8574_DEFAULT_ROWS), \
+		.bl_active_low = DT_INST_PROP_OR(inst, bl_active_low, false), \
+	};
+
+#define HD44780_DATA(inst) \
+	static struct hd44780_pcf8574_data data_##inst;
+
+#define HD44780_DEV(inst) \
+	DEVICE_DT_INST_DEFINE(inst, \
+		hd44780_init, NULL, \
+		&data_##inst, &cfg_##inst, \
+		POST_KERNEL, CONFIG_HD44780_PCF8574_INIT_PRIORITY, \
+		&api);
+
+DT_INST_FOREACH_STATUS_OKAY(HD44780_CFG)
+DT_INST_FOREACH_STATUS_OKAY(HD44780_DATA)
+DT_INST_FOREACH_STATUS_OKAY(HD44780_DEV)
+
+/* -------- Optional: small convenience helpers guarded by Kconfig -------- */
+
+

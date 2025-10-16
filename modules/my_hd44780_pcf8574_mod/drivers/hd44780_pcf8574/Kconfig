@@ -1,0 +1,37 @@
+menu "HD44780 over PCF8574"
+
+config HD44780_PCF8574
+        bool "HD44780 LCD via PCF8574 I2C backpack"
+        select I2C
+        help
+          Enable a simple HD44780 LCD driver that talks to the LCD
+          through a PCF8574 8-bit I2C I/O expander.
+
+endmenu
+
+
+
+if HD44780_PCF8574
+
+config HD44780_PCF8574_INIT_PRIORITY
+	int "Init priority"
+	default 80
+	help
+	  Device init priority for the LCD driver.
+
+config HD44780_PCF8574_DEFAULT_COLS
+	int "Default columns"
+	default 16
+	range 8 40
+
+config HD44780_PCF8574_DEFAULT_ROWS
+	int "Default rows"
+	default 2
+	range 1 4
+
+config HD44780_PCF8574_BACKLIGHT_ON_BOOT
+	bool "Backlight on at boot"
+	default y
+
+endif
+

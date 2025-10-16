@@ -83,7 +83,8 @@ int main(void)
 	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
 	gpio_add_callback(button.port, &button_cb_data);
 
-	while (1) {
+	while (1)
+	{
 		k_msleep(100);
 	}
 }
