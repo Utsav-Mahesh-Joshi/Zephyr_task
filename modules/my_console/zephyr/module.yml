@@ -1,0 +1,8 @@
+name: my_console
+build:
+  cmake: .
+  kconfig: Kconfig
+  # Optional: if you have DTS bindings or boards in this module
+  # settings:
+  #   dts_root: .
+

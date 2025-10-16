@@ -1,0 +1,146 @@
+
+#include <zephyr/net/net_if.h>
+#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/wifi_mgmt.h>
+#include <zephyr/net/dhcpv4.h>
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(wifi_demo, LOG_LEVEL_INF);
+
+#define WIFI_SSID		"Utsav"
+#define WIFI_PSK		"utsav12345"
+#define WIFI_SECURITY		WIFI_SECURITY_TYPE_PSK	/* WPA2-PSK */
+#define MAX_BACKOFF_MS		60000			/* cap backoff at 60s */
+
+static struct net_mgmt_event_callback wifi_cb;
+static struct net_if *iface;
+static volatile bool wifi_link_up;
+static volatile bool got_ipv4;
+
+static void event_handler(struct net_mgmt_event_callback *cb,
+	      uint64_t mgmt_event,
+	      struct net_if *iface_cb)
+{
+	switch (mgmt_event)
+	{
+	case NET_EVENT_WIFI_CONNECT_RESULT:
+	{
+		const struct wifi_status *st = (const struct wifi_status *)cb->info;
+		if (st->status == 0)
+		{
+			LOG_INF("WiFi link up (auth done)");
+			wifi_link_up = true;
+		}
+		else
+		{
+			LOG_INF("WiFi connect failed: %d", st->status);
+			wifi_link_up = false;
+		}
+		break;
+	}
+	case NET_EVENT_WIFI_DISCONNECT_RESULT:
+		LOG_INF("WiFi disconnected");
+		wifi_link_up = false;
+		got_ipv4 = false;
+		break;
+
+	case NET_EVENT_IPV4_ADDR_ADD:
+		LOG_INF("IPv4 acquired");
+		got_ipv4 = true;
+		break;
+
+	case NET_EVENT_IPV4_ADDR_DEL:
+		LOG_INF("IPv4 lost");
+		got_ipv4 = false;
+		break;
+
+	default:
+		LOG_INF("event handler %llu",mgmt_event);
+		break;
+	}
+}
+
+static int wifi_connect_once(void)
+{
+	struct wifi_connect_req_params params = {0};
+
+	params.ssid = WIFI_SSID;
+	params.ssid_length = strlen(WIFI_SSID);
+	params.psk = WIFI_PSK;
+	params.psk_length = strlen(WIFI_PSK);
+	params.security = WIFI_SECURITY;
+	params.channel = WIFI_CHANNEL_ANY;
+	params.mfp = WIFI_MFP_OPTIONAL;
+
+	int ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &params, sizeof(params));
+	if (ret == 0)
+	{
+		LOG_INF("wifi connect requested");
+	}
+	else
+	{
+		LOG_INF("wifi connect -> %d", ret);
+	}
+	return ret;
+}
+
+static void ensure_dhcp(void)
+{
+#if defined(CONFIG_NET_DHCPV4)
+	/* If DHCP is Kconfig-enabled, Zephyr usually starts it automatically after L2 up,
+	 * but explicitly starting is harmless on many setups.
+	 */
+	(void)net_dhcpv4_start(iface);
+#endif
+}
+
+void wifi_connect_forever(void)
+{
+	uint32_t backoff = 1000; /* start at 1s */
+
+	while (!got_ipv4)
+	{
+		int ret = wifi_connect_once();
+		LOG_INF("ret of connect %d",ret);
+		/* If request was accepted or we're already connecting/connected, wait on events */
+		if (ret == 0 || ret == -EALREADY)
+		{
+			/* Wait up to backoff window for IP; poll flags with sleep slices */
+			uint32_t waited = 0;
+			ensure_dhcp();
+
+			while (waited < backoff && !got_ipv4 && wifi_link_up)
+			{
+				k_msleep(100);
+				waited += 100;
+			}
+
+			if (got_ipv4)
+			{
+				LOG_INF("Connected with IPv4, done.");
+				break;
+			}
+		}
+
+		/* Backoff before the next attempt */
+		LOG_INF("Retrying in %u ms", backoff);
+		k_msleep(backoff);
+		backoff = MIN(backoff * 2, MAX_BACKOFF_MS);
+	}
+}
+
+int main(void)
+{
+	iface = net_if_get_default();
+
+	net_mgmt_init_event_callback(&wifi_cb, event_handler,
+				     NET_EVENT_WIFI_CONNECT_RESULT |
+				     NET_EVENT_WIFI_DISCONNECT_RESULT |
+				     NET_EVENT_IPV4_ADDR_ADD |
+				     NET_EVENT_IPV4_ADDR_DEL);
+	net_mgmt_add_event_callback(&wifi_cb);
+
+	LOG_INF("boot");
+	wifi_connect_forever();
+	return 0;
+}
+

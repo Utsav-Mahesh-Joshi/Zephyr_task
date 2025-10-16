@@ -3,7 +3,7 @@
 build/
 bootloader/
 tools/
-zephyr/
+/zephyr/
 .venv/
 .vscode/
 .west/

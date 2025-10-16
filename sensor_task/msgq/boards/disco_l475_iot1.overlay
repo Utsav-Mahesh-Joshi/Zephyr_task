@@ -36,7 +36,7 @@
 
 &i2c2 {
         status = "okay";
-	pinctrl-names = "default"; 
+
         /* HTS221 @ 0x5F */
         hts: hts221@5f {
                 compatible = "st,hts221";
@@ -62,16 +62,29 @@
 };
 
 
+/* boards/<your_board>.overlay */
 
-/ {
-	chosen {
-		zephyr,console = &usart1;
-		zephyr,shell-uart = &usart1;
-	};
-};
-&usart1 {
-	status = "okay";
-	/* current-speed 115200 is already set by the board; keep it */
-	wakeup-source;		/* <- key: RX can wake from STOP */
-	 wakeup-line = <7>;
-};
+// / {
+//	chosen {
+//		zephyr,console = &usart1;
+//		zephyr,shell-uart = &usart1;
+//		zephyr,uart-mcumgr = &usart1;	/* if you use mcumgr */
+//	};
+//};
+
+//&usart1 {
+//	status = "okay";
+//	current-speed = <115200>;
+	/* your real pins here (PA9/PA10 are common on L4) */
+//	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pa10>;
+//	pinctrl-names = "default";
+
+	/* key bit: allow RX to wake the core from STOP */
+//	wakeup-source;
+
+	/* some STM32 families/instances also need an explicit EXTI line
+	 * for STOP wake (only if your SoC binding requires it):
+	 * wakeup-line = <5>;    // EXTI number example
+	 */
+//};
+

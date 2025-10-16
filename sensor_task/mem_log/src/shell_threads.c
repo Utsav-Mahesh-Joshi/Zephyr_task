@@ -1,7 +1,10 @@
-/* shell_threads.c : 1-minute tickless sampler
- *	- Workers only update shared sensor_data (no FS writes)
- *	- Coordinator triggers HT -> PRESS -> IMU, snapshots data, writes once
- *	- No device runtime PM; CPU/system sleeps while idle
+
+/**
+ * @file
+ * @brief Shell-driven periodic sensor logger (HT, Pressure, IMU) with tickless scheduling.
+ *
+ * Workers only update a shared snapshot under mutex; the coordinator triggers the
+ * chain HT→PRESS→IMU, then writes a single compact line to LittleFS each period.
  */
 
 #include "shell_threads.h"
@@ -14,8 +17,8 @@
 #include <string.h>
 
 /* ------------ config ------------ */
-#define LOG_PERIOD_MS		6000		/* 6 s (set 60000 for 60 s) */
-#define SENSOR_PATH		"/lfs/sensor.txt"
+#define LOG_PERIOD_MS		6000		/**< Logging period in milliseconds (set 60000 for 60 s). */
+#define SENSOR_PATH		"/lfs/sensor.txt"	/**< Log file path in LittleFS. */
 
 LOG_MODULE_REGISTER(shell_threads);
 
@@ -29,27 +32,32 @@ static K_THREAD_STACK_DEFINE(coord_stack, 3072);
 static k_tid_t			hum_tid, press_tid, imu_tid, coord_tid;
 
 /* ------------ semaphores (chain + control) ------------ */
-K_SEM_DEFINE(semHT,	0, 1);		/* coordinator -> HT start */
-K_SEM_DEFINE(semPress,	0, 1);		/* HT -> PRESS */
-K_SEM_DEFINE(semGyro,	0, 1);		/* PRESS -> IMU */
-K_SEM_DEFINE(semDone,	0, 1);		/* IMU -> coordinator (cycle done) */
+K_SEM_DEFINE(semHT,	0, 1);		/**< Coordinator → HT worker trigger. */
+K_SEM_DEFINE(semPress,	0, 1);		/**< HT → PRESS handoff. */
+K_SEM_DEFINE(semGyro,	0, 1);		/**< PRESS → IMU handoff. */
+K_SEM_DEFINE(semDone,	0, 1);		/**< IMU → Coordinator cycle completion. */
 
-/* ------------ shared data ------------ */
+/** @brief Aggregated sensor snapshot shared between workers and coordinator. */
 struct sensor_data {
-	float		temp;
-	float		hum;
-	float		press;
-	float		ax, ay, az;
-	float		gx, gy, gz;
-	bool		ht_ok;
-	bool		press_ok;
-	bool		imu_ok;
+	float		temp;		/**< Temperature in °C. */
+	float		hum;		/**< Relative humidity in %. */
+	float		press;		/**< Pressure in kPa. */
+	float		ax, ay, az;	/**< Accelerometer axes (SI units as provided by driver). */
+	float		gx, gy, gz;	/**< Gyroscope axes (SI units as provided by driver). */
+	bool		ht_ok;		/**< Humidity/temperature reading validity. */
+	bool		press_ok;	/**< Pressure reading validity. */
+	bool		imu_ok;		/**< IMU reading validity. */
 };
 
-static struct sensor_data	g_sd;
-static struct k_mutex		g_sd_mtx;
+static struct sensor_data	g_sd;		/**< Live shared snapshot (protected by @ref g_sd_mtx). */
+static struct k_mutex		g_sd_mtx;	/**< Mutex protecting @ref g_sd. */
 
 /* ------------ helpers ------------ */
+/**
+ * @brief Get current uptime as seconds and millisecond remainder.
+ * @param[out] sec	Seconds since boot.
+ * @param[out] mms	Millisecond remainder (0–999).
+ */
 static inline void ts_now(uint32_t *sec, uint32_t *mms)
 {
 	uint64_t ms = k_uptime_get();
@@ -57,33 +65,60 @@ static inline void ts_now(uint32_t *sec, uint32_t *mms)
 	*mms = (uint32_t)(ms % 1000U);
 }
 
-/* parse helpers: your existing *_get_string() return formatted text.
- * Below we parse the few numbers we need. If you control those functions,
- * consider adding dedicated getters to avoid sscanf().
+/**
+ * @brief Parse "Temperature/Humidity" line into floats.
+ * @param s	Input string (e.g., "Temperature: 24.3 C, Humidity: 55.0 %").
+ * @param t	Output temperature (°C).
+ * @param h	Output humidity (%).
+ * @return true on success; false otherwise.
  */
 static bool parse_ht(const char *s, float *t, float *h)
 {
 	/* expects: "Temperature: %.1f C, Humidity: %.1f %%\n" */
 	return (sscanf(s, "Temperature: %f C, Humidity: %f %%", t, h) == 2);
 }
+
+/**
+ * @brief Parse "Pressure" line into float.
+ * @param s	Input string (e.g., "Pressure: 101.3 kPa").
+ * @param p	Output pressure (kPa).
+ * @return true on success; false otherwise.
+ */
 static bool parse_press(const char *s, float *p)
 {
 	/* expects: "Pressure: %.1f kPa\n" */
 	return (sscanf(s, "Pressure: %f", p) == 1);
 }
+
+/**
+ * @brief Parse "IMU" line (Accel/Gyro) into six floats.
+ * @param s	Input string (e.g., "Accel: ax, ay, az | Gyro: gx, gy, gz").
+ * @param ax,ay,az	Accel outputs.
+ * @param gx,gy,gz	Gyro outputs.
+ * @return true on success; false otherwise.
+ */
 static bool parse_imu(const char *s, float *ax, float *ay, float *az, float *gx, float *gy, float *gz)
 {
-	/* expects: "Accel: ax, ay, az | Gyro: gx, gy, gz\n" */
+	/* expects: "Accel: %f, %f, %f | Gyro: %f, %f, %f\n" */
 	return (sscanf(s, "Accel: %f, %f, %f | Gyro: %f, %f, %f", ax, ay, az, gx, gy, gz) == 6);
 }
 
 /* ------------ worker threads (no FS; update g_sd only) ------------ */
+/**
+ * @brief Humidity/Temperature worker.
+ *
+ * Waits on @ref semHT, fetches HT data via @c hum_temp_sensor_get_string(),
+ * parses values, updates @ref g_sd under @ref g_sd_mtx, then signals @ref semPress.
+ *
+ * @param a Unused.
+ * @param b Unused.
+ * @param c Unused.
+ */
 void hum_thread(void *a, void *b, void *c)
 {
 	char	buf[128];
 
-	for (;;)
-	{
+	for (;;) {
 		k_sem_take(&semHT, K_FOREVER);
 
 		bool	ok = false;
@@ -109,12 +144,21 @@ void hum_thread(void *a, void *b, void *c)
 	}
 }
 
+/**
+ * @brief Pressure worker.
+ *
+ * Waits on @ref semPress, fetches pressure via @c pressure_sensor_get_string(),
+ * parses value, updates @ref g_sd, then signals @ref semGyro.
+ *
+ * @param a Unused.
+ * @param b Unused.
+ * @param c Unused.
+ */
 void press_thread(void *a, void *b, void *c)
 {
 	char	buf[128];
 
-	for (;;)
-	{
+	for (;;) {
 		k_sem_take(&semPress, K_FOREVER);
 
 		bool	ok = false;
@@ -139,12 +183,21 @@ void press_thread(void *a, void *b, void *c)
 	}
 }
 
+/**
+ * @brief IMU worker.
+ *
+ * Waits on @ref semGyro, fetches IMU via @c imu_sensor_get_string(),
+ * parses six axes, updates @ref g_sd, then signals @ref semDone.
+ *
+ * @param a Unused.
+ * @param b Unused.
+ * @param c Unused.
+ */
 void imu_thread(void *a, void *b, void *c)
 {
 	char	buf[192];
 
-	for (;;)
-	{
+	for (;;) {
 		k_sem_take(&semGyro, K_FOREVER);
 
 		bool	ok = false;
@@ -171,30 +224,38 @@ void imu_thread(void *a, void *b, void *c)
 }
 
 /* ------------ coordinator (periodic, writes once) ------------ */
+/**
+ * @brief Coordinator thread: triggers chain and appends one line to the log per period.
+ *
+ * Flow per cycle:
+ * 1) Give @ref semHT and wait for @ref semDone (HT→PRESS→IMU completes).  
+ * 2) Snapshot @ref g_sd under @ref g_sd_mtx.  
+ * 3) Timestamp and write a single compact line to @ref SENSOR_PATH.  
+ * 4) Sleep until next absolute deadline (tickless-friendly).
+ *
+ * @param a Unused.
+ * @param b Unused.
+ * @param c Unused.
+ */
 static void coordinator_thread(void *a, void *b, void *c)
 {
 	int64_t		next_deadline = k_uptime_get();
 	struct fs_file_t	file;
 	char		line[320];
 
-	for (;;)
-	{
+	for (;;) {
 		next_deadline += LOG_PERIOD_MS;
 
-		/* start chain and wait for completion */
 		k_sem_give(&semHT);
 		k_sem_take(&semDone, K_FOREVER);
 
-		/* snapshot shared data under mutex */
 		struct sensor_data snap;
 		k_mutex_lock(&g_sd_mtx, K_FOREVER);
 		snap = g_sd;
 		k_mutex_unlock(&g_sd_mtx);
 
-		/* timestamp and single-file-write */
 		uint32_t sec, mms; ts_now(&sec, &mms);
 
-		/* format one compact line (adapt as you prefer) */
 		int n = snprintk(line, sizeof(line),
 			"[%lu.%03lu] HT[%c] T=%.2fC H=%.2f%% | P[%c]=%.2fkPa | "
 			"IMU[%c] A=(%.2f,%.2f,%.2f) G=(%.2f,%.2f,%.2f)\r\n",
@@ -211,7 +272,6 @@ static void coordinator_thread(void *a, void *b, void *c)
 			}
 		}
 
-		/* sleep until next absolute boundary (tickless → one-shot) */
 		int64_t	now = k_uptime_get();
 		int64_t	sleep_ms = next_deadline - now;
 		if (sleep_ms < 1) sleep_ms = 1;
@@ -220,6 +280,16 @@ static void coordinator_thread(void *a, void *b, void *c)
 }
 
 /* ------------ shell cmds ------------ */
+/**
+ * @brief Shell cmd: start all sensor workers and coordinator (idempotent).
+ *
+ * Creates workers if not already running, initializes mutex and clears snapshot.
+ *
+ * @param sh	Shell instance.
+ * @param argc	Unused.
+ * @param argv	Unused.
+ * @return 0 on success.
+ */
 static int cmd_start_sensor(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc); ARG_UNUSED(argv);
@@ -255,6 +325,17 @@ static int cmd_start_sensor(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/**
+ * @brief Shell cmd: stop coordinator and workers; drain semaphores.
+ *
+ * Aborts all running threads (if any) and clears semaphore counts so that
+ * the next `start_sensors` begins from a clean state.
+ *
+ * @param sh	Shell instance.
+ * @param argc	Unused.
+ * @param argv	Unused.
+ * @return 0 on success.
+ */
 static int cmd_stop_sensors(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc); ARG_UNUSED(argv);
@@ -273,6 +354,16 @@ static int cmd_stop_sensors(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/**
+ * @brief Shell cmd: delete the sensor log file.
+ *
+ * Removes @ref SENSOR_PATH; ignores ENOENT (already absent).
+ *
+ * @param shell	Shell instance.
+ * @param argc	Unused.
+ * @param argv	Unused.
+ * @return 0 on success, negative errno on failure.
+ */
 static int cmd_clear_logs(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc); ARG_UNUSED(argv);
@@ -287,11 +378,14 @@ static int cmd_clear_logs(const struct shell *shell, size_t argc, char **argv)
 }
 
 /* ------------ shell reg ------------ */
+/** @brief Subcommands for `sensors` top-level shell command. */
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_sensors,
 	SHELL_CMD(start_sensors,	NULL, "Start periodic sensor logging",	cmd_start_sensor),
 	SHELL_CMD(stop_sensors,		NULL, "Stop sensor logging",		cmd_stop_sensors),
 	SHELL_CMD(clear_logs,		NULL, "Clear sensor log file",		cmd_clear_logs),
 	SHELL_SUBCMD_SET_END
 );
+
+/** @brief Register `sensors` shell command group. */
 SHELL_CMD_REGISTER(sensors, &sub_sensors, "Sensor logging commands", NULL);
 

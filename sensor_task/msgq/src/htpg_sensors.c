@@ -6,9 +6,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <stdio.h>
-#include <zephyr/pm/device.h>
-#include <zephyr/pm/device_runtime.h>
-
 
 LOG_MODULE_REGISTER(sensors);
 const struct device *const hts_dev = DEVICE_DT_GET(DT_ALIAS(ht_sensor));
@@ -23,17 +20,13 @@ int hum_temp_sensor_get_string(char *buf, size_t buf_len)
     {
 	    return -1;
     }
-
-    ret=pm_device_runtime_get(hts_dev);
-     if (ret < 0) return -1;
     struct sensor_value temp, hum;
-
     if (sensor_channel_get(hts_dev, SENSOR_CHAN_AMBIENT_TEMP, &temp) < 0) return -1;
     if (sensor_channel_get(hts_dev, SENSOR_CHAN_HUMIDITY, &hum) < 0) return -1;
-	// pm_device_runtime_put(hts_dev);
+
     double t = sensor_value_to_double(&temp);
     double h = sensor_value_to_double(&hum);
-	 pm_device_runtime_put(hts_dev);
+
     LOG_INF("Temperature: %.1f C", t);
     LOG_INF("Humidity: %.1f %%", h);
 
@@ -48,7 +41,6 @@ int hum_temp_sensor_init(void)
         LOG_ERR("sensor: %s device not ready.", hts_dev->name);
         return -1;
     }
-	    pm_device_runtime_enable(hts_dev);
 
 
     return 0;
