@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Configuration options for the Adafruit MQTT Zephyr adapter.
+
+menu "Adafruit MQTT (Zephyr Port)"
+
+config ADAFRUIT_MQTT_ZEPHYR
+	bool "Enable Adafruit MQTT Zephyr adapter"
+	default y
+	help
+	  Enable the Zephyr-native port of the Adafruit MQTT client library.
+	  This wraps Zephyr’s <zephyr/net/mqtt.h> API to expose functions
+	  compatible with Adafruit_MQTT_Client and Adafruit_MQTT_Publish/
+	  Subscribe interfaces.
+
+config ADAFRUIT_MQTT_LOG_LEVEL
+	int "Default log level"
+	default 3
+	range 0 4
+	help
+	  0 = none, 1 = error, 2 = warn, 3 = info, 4 = debug
+
+endmenu
+

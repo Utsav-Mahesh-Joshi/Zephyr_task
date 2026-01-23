@@ -9,6 +9,7 @@
 
 #include <zephyr/net/net_event.h>
 #include "ping.h"
+#include "http_get.h"
 LOG_MODULE_REGISTER(wifi_demo);
 
 /* ---- SET THESE or pass via Kconfig/overlay/env ---- */
@@ -157,6 +158,7 @@ void wifi_disconnect()
 }
 int main(void)
 {
+	int sock;
 	printk("chik chik \r\n");
 	LOG_INF("Wifi Example \r\nBoard:%s",CONFIG_BOARD);
 	net_mgmt_init_event_callback(&wifi_cb,wifi_event_handler,
@@ -174,5 +176,19 @@ int main(void)
 
 	wifi_status(&ipv4_sem,K_FOREVER);
 	ping("8.8.8.8",4);
+
+	LOG_INF("Looking up IP address");
+	struct zsock_addrinfo *res;
+	//nslookup("example.com",&res);
+	nslookup("io.adafruit.com",&res);
+//	nslookup("portainer.happyjoy.in",&res);
+	print_addrinfo_results(&res);
+
+	LOG_INF("Connecting to HTTP Server:");
+    	sock = connect_socket(&res, 80);
+	k_msleep(10);
+    	http_get(sock, "example.com", "http://example.com/");
+	k_msleep(10);
+    	zsock_close(sock);
 }
 

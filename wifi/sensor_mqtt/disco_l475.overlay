@@ -1,0 +1,19 @@
+&i2c2 {
+        status = "okay";
+
+        /* HTS221 @ 0x5F */
+        hts: hts221@5f {
+                compatible = "st,hts221";
+                reg = <0x5f>;
+                /* adjust to your actual DRDY pin if you want an IRQ */
+                /* drdy-gpios = <&gpiod 15 GPIO_ACTIVE_HIGH>; */
+                status = "okay";
+        };
+};
+
+
+/{
+	aliases{
+		ambient_temp0=hts;
+	};
+};

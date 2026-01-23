@@ -1,0 +1,6 @@
+name: adafruit_mqtt_zephyr
+
+build:
+  cmake: .
+  kconfig: Kconfig
+
